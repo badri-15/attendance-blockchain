@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AttendChain</title>
+<script src="https://cdn.jsdelivr.net/npm/ethers@6.13.2/dist/ethers.umd.min.js"></script>
+<style>
+:root{--bg:#eef1f4;--card:#fff;--ink:#14213d;--mute:#5b667a;--line:#cfd6e0;--ok:#1b7f4b;--okbg:#e4f4ea;--bad:#b3261e;--badbg:#fdeaea}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,Segoe UI,sans-serif}
+main{max-width:940px;margin:0 auto;padding:20px 16px 60px}
+h1{font:700 30px Georgia,serif;margin:6px 0}h2{font:600 18px Georgia,serif;margin:0 0 10px}
+.panel{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:16px;margin-bottom:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
+label{display:block;font-size:13px;color:var(--mute)}
+input,select{width:100%;padding:8px;border:1px solid var(--line);border-radius:4px;font:inherit}
+button{padding:8px 14px;border-radius:4px;border:1px solid var(--ink);background:var(--ink);color:#fff;cursor:pointer;font:inherit}
+button.g{background:#fff;color:var(--ink);border-color:var(--line)}
+.row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:12px}
+.note{font-size:13px;color:var(--mute)}
+.banner{padding:10px 14px;border-radius:4px;font-weight:600;margin:10px 0}
+.ok{background:var(--okbg);color:var(--ok)}.bad{background:var(--badbg);color:var(--bad)}
+.blk{background:var(--card);border:1px solid var(--line);border-left:6px solid var(--ok);border-radius:6px;padding:14px}
+.blk.bad{border-left-color:var(--bad);background:var(--badbg)}
+.blk h3{margin:0 0 6px;font:600 16px Georgia,serif;display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px}
+.h{font:12px Consolas,monospace;word-break:break-all;margin:2px 0 8px}.h b{display:block;font:12px system-ui;color:var(--mute)}
+.d{color:var(--bad)}
+table{width:100%;border-collapse:collapse;font-size:13px}td,th{text-align:left;padding:4px 6px;border-bottom:1px solid var(--line)}
+td button{padding:2px 8px;font-size:12px}
+.link{text-align:center;color:var(--mute);font:12px Consolas,monospace;padding:6px}
+a{color:var(--ink)}
+</style>
+</head>
+<body>
+<main>
+<h1>AttendChain</h1>
+<p class="note">Student attendance on a blockchain: Flask backend (SHA-256 chain) + Ethereum Sepolia anchoring through MetaMask.</p>
+
+<section class="panel">
+<h2>1. Mark attendance (transaction)</h2>
+<div class="grid">
+<div><label>Student ID</label><input id="sid" value="1AB22CS001"></div>
+<div><label>Name</label><input id="nm" value="Asha"></div>
+<div><label>Subject</label><input id="sb" value="BIC702"></div>
+<div><label>Date</label><input id="dt" type="date"></div>
+<div><label>Status</label><select id="st"><option>Present</option><option>Absent</option></select></div>
+</div>
+<div class="row"><button onclick="addTx()">Add to pending</button><button class="g" onclick="mine()">Mine block</button><span id="msg" class="note"></span></div>
+<div id="pend" class="note" style="margin-top:8px"></div>
+</section>
+
+<section class="panel">
+<h2>2. Student lookup</h2>
+<div class="row" style="margin:0"><input id="q" placeholder="Student ID" style="max-width:220px"><button class="g" onclick="lookup()">Show history</button></div>
+<div id="hist" class="note" style="margin-top:8px"></div>
+</section>
+
+<section class="panel">
+<h2>3. Ethereum (Sepolia) anchoring</h2>
+<div class="grid"><div style="grid-column:1/-1"><label>Deployed contract address (from Remix)</label><input id="addr" placeholder="0x..."></div></div>
+<div class="row"><button onclick="connect()">Connect MetaMask</button><button class="g" onclick="anchorLatest()">Anchor latest block</button><button class="g" onclick="verifyAll()">Verify chain against Sepolia</button></div>
+<div id="eth" class="note" style="margin-top:8px"></div>
+</section>
+
+<section>
+<h2>4. Blockchain</h2>
+<div class="row" style="margin:0 0 6px"><button class="g" onclick="refresh()">Validate chain</button><button class="g" onclick="reset()">Reset ledger</button></div>
+<div id="banner"></div>
+<p class="note">Tamper test: click "Flip status" on a transaction (no re-hash), then "Attacker re-mines" to see that local validation passes again but Sepolia verification still fails.</p>
+<div id="chain"></div>
+</section>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+let S=null, onchain={}, signer=null, contract=null;
+const ABI=["function anchorBlock(uint256 blockIndex, bytes32 blockHash)","function anchors(uint256) view returns (bytes32)"];
+$("dt").value=new Date().toISOString().slice(0,10);
+$("addr").value=localStorage.getItem("addr")||"";
+
+async function api(p,m="GET",b){const r=await fetch("/api/"+p,{method:m,headers:{"Content-Type":"application/json"},body:b?JSON.stringify(b):undefined});const j=await r.json();if(!r.ok){$("msg").textContent=j.error||"Error";return null}$("msg").textContent="";return j}
+async function refresh(){const j=await api("state");if(j){S=j;render()}}
+async function addTx(){const j=await api("attendance","POST",{student_id:$("sid").value,name:$("nm").value,subject:$("sb").value,date:$("dt").value,status:$("st").value});if(j){S=j;render()}}
+async function mine(){$("msg").textContent="Mining...";const j=await api("mine","POST");if(j){S=j;render();$("msg").textContent="Block mined."}}
+async function tamper(b,t,s){const j=await api("tamper","POST",{block:b,tx:t,status:s==="Present"?"Absent":"Present"});if(j){S=j;render()}}
+async function remine(b){const j=await api("remine","POST",{block:b});if(j){S=j;render()}}
+async function reset(){onchain={};const j=await api("reset","POST");if(j){S=j;render()}}
+async function lookup(){const r=await (await fetch("/api/student/"+encodeURIComponent($("q").value))).json();$("hist").innerHTML=r.length?r.map(t=>`${esc(t.date)} · ${esc(t.subject)} · <b>${esc(t.status)}</b> (block ${t.block})`).join("<br>"):"No records found."}
+
+function render(){
+  const v=S.validation;
+  $("pend").innerHTML=S.pending.length?"Pending: "+S.pending.map(t=>esc(t.student_id)+" "+esc(t.status)).join(", "):"No pending entries.";
+  const bad=v.blocks.findIndex(b=>!b.valid);
+  $("banner").innerHTML=`<div class="banner ${v.valid?"ok":"bad"}">${v.valid?"Local chain is valid.":"Local chain INVALID. Tampering detected at block "+bad+"."}</div>`;
+  $("chain").innerHTML=S.chain.map((b,i)=>{
+    const r=v.blocks[i], oc=onchain[i];
+    const rows=b.transactions.map((t,j)=>`<tr><td>${esc(t.student_id)}</td><td>${esc(t.name)}</td><td>${esc(t.subject)}</td><td>${esc(t.date)}</td><td>${esc(t.status)}</td><td><button class="g" onclick="tamper(${i},${j},'${t.status}')">Flip status</button></td></tr>`).join("")||`<tr><td colspan="6">Genesis block</td></tr>`;
+    const ocTag=oc===undefined?"":oc==="match"?" · <span style='color:var(--ok)'>Sepolia: match</span>":oc==="none"?" · Sepolia: not anchored":" · <b class='d'>Sepolia: MISMATCH</b>";
+    return (i?`<div class="link">${r.link_ok&&v.blocks[i-1].valid?"↓ previous hash matches":"↓ link broken"}</div>`:"")+
+    `<article class="blk ${r.valid?"":"bad"}"><h3><span>Block ${b.index}${ocTag}</span><span>${r.valid?"Valid":"Invalid"}</span></h3>
+    <div class="note">${esc(b.timestamp)} · nonce ${b.nonce}</div>
+    <table><tr><th>ID</th><th>Name</th><th>Subject</th><th>Date</th><th>Status</th><th></th></tr>${rows}</table>
+    <div class="h"><b>Previous hash</b>${b.previous_hash}</div>
+    <div class="h"><b>Stored hash</b>${b.hash}</div>
+    <div class="h ${r.hash_ok?"":"d"}"><b>Recalculated hash</b>${r.recalculated}</div>
+    ${i&&!r.valid?`<button class="g" onclick="remine(${i})">Attacker re-mines from here</button>`:""}</article>`}).join("");
+}
+
+async function connect(){
+  try{
+    if(!window.ethereum){$("eth").textContent="MetaMask not found. Install the extension.";return}
+    let p=new ethers.BrowserProvider(window.ethereum);
+    await p.send("eth_requestAccounts",[]);
+    if((await p.getNetwork()).chainId!==11155111n){await p.send("wallet_switchEthereumChain",[{chainId:"0xaa36a7"}]);p=new ethers.BrowserProvider(window.ethereum)}
+    signer=await p.getSigner();
+    const a=$("addr").value.trim();if(!ethers.isAddress(a)){$("eth").textContent="Connected as "+await signer.getAddress()+". Paste a valid contract address.";return}
+    localStorage.setItem("addr",a);contract=new ethers.Contract(a,ABI,signer);
+    $("eth").textContent="Connected on Sepolia as "+await signer.getAddress();
+  }catch(e){$("eth").textContent="Error: "+(e.shortMessage||e.message)}
+}
+async function anchorLatest(){
+  try{
+    if(!contract)await connect();if(!contract)return;
+    const b=S.chain[S.chain.length-1];
+    $("eth").textContent="Confirm the transaction in MetaMask...";
+    const tx=await contract.anchorBlock(b.index,"0x"+b.hash);await tx.wait();
+    $("eth").innerHTML=`Block ${b.index} anchored. <a target="_blank" href="https://sepolia.etherscan.io/tx/${tx.hash}">View on Etherscan</a>`;
+  }catch(e){$("eth").textContent="Error: "+(e.shortMessage||e.message)}
+}
+async function verifyAll(){
+  try{
+    if(!contract)await connect();if(!contract)return;
+    onchain={};
+    for(const b of S.chain){const h=await contract.anchors(b.index);onchain[b.index]=h===ethers.ZeroHash?"none":(h.toLowerCase()==="0x"+b.hash?"match":"mismatch")}
+    $("eth").textContent="Verification finished.";render();
+  }catch(e){$("eth").textContent="Error: "+(e.shortMessage||e.message)}
+}
+refresh();
+</script>
+</body>
+</html>
